@@ -11,8 +11,6 @@ use std::collections::BTreeMap;
 // Share of non-missing values that must parse for a type to be chosen. Values
 // that don't parse are reported and treated as missing.
 const PARSE_THRESHOLD: f64 = 0.95;
-// Values checked before committing to a full pass for a candidate type
-const SAMPLE_SIZE: usize = 1000;
 const MAX_EXAMPLES: usize = 5;
 
 // Values treated as missing (compared case-insensitively after trimming)
@@ -179,58 +177,46 @@ where
         cleaned.push(Some(trimmed));
     }
 
-    let present: Vec<&str> = cleaned.iter().flatten().copied().collect();
+    let present = cleaned.iter().flatten().count();
     let name = PlSmallStr::from(name);
-    if present.is_empty() {
+    if present == 0 {
         info.inferred = InferredType::Empty;
         return Ok((Series::new_null(name, cleaned.len()), info));
     }
 
-    let sample = &present[..present.len().min(SAMPLE_SIZE)];
-    let passes = |parse: &dyn Fn(&str) -> bool, values: &[&str]| {
-        values.iter().filter(|v| parse(v)).count() as f64 / values.len() as f64 >= PARSE_THRESHOLD
-    };
-
-    let series = if passes(&|v| parse_bool(v).is_some(), sample)
-        && passes(&|v| parse_bool(v).is_some(), &present)
-    {
+    let series = if let Some(c) = try_convert(&cleaned, present, parse_bool) {
         info.inferred = InferredType::Boolean;
-        let typed = convert(&cleaned, &mut info, parse_bool);
-        Series::new(name, typed)
-    } else if passes(&|v| parse_number(v).is_some(), sample)
-        && passes(&|v| parse_number(v).is_some(), &present)
-    {
-        let mut all_integers = true;
-        let typed = convert(&cleaned, &mut info, |v| {
-            let (n, integral, formatted) = parse_number(v)?;
-            all_integers &= integral;
-            Some((n, formatted))
-        });
-        info.formatted_numbers = typed.iter().flatten().filter(|(_, f)| *f).count();
-        let numbers: Vec<Option<f64>> = typed.into_iter().map(|v| v.map(|(n, _)| n)).collect();
-        if all_integers {
+        c.record(&mut info);
+        Series::new(name, c.values)
+    } else if let Some(c) = try_convert(&cleaned, present, parse_number) {
+        c.record(&mut info);
+        info.formatted_numbers = c.values.iter().flatten().filter(|v| v.2).count();
+        if c.values.iter().flatten().all(|v| v.1) {
             info.inferred = InferredType::Integer;
-            Series::new(
-                name,
-                numbers
-                    .into_iter()
-                    .map(|v| v.map(|n| n as i64))
-                    .collect::<Vec<_>>(),
-            )
+            let ints: Vec<Option<i64>> = c
+                .values
+                .iter()
+                .map(|v| v.map(|(n, _, _)| n as i64))
+                .collect();
+            Series::new(name, ints)
         } else {
             info.inferred = InferredType::Float;
-            Series::new(name, numbers)
+            let floats: Vec<Option<f64>> = c.values.iter().map(|v| v.map(|(n, _, _)| n)).collect();
+            Series::new(name, floats)
         }
-    } else if passes(&|v| parse_temporal(v).is_some(), sample)
-        && passes(&|v| parse_temporal(v).is_some(), &present)
-    {
-        let typed = convert(&cleaned, &mut info, parse_temporal);
+    } else if let Some(c) = {
+        // Most columns use one format throughout, so try the last match first
+        let mut last = None;
+        try_convert(&cleaned, present, |v| parse_temporal(v, &mut last))
+    } {
+        c.record(&mut info);
         let mut has_time = false;
-        for (_, format, with_time) in typed.iter().flatten() {
+        for (_, format, with_time) in c.values.iter().flatten() {
             *info.date_formats.entry(format.to_string()).or_default() += 1;
             has_time |= *with_time;
         }
-        let millis: Vec<Option<i64>> = typed
+        let millis: Vec<Option<i64>> = c
+            .values
             .iter()
             .map(|v| v.map(|(dt, _, _)| dt.and_utc().timestamp_millis()))
             .collect();
@@ -249,24 +235,49 @@ where
     Ok((series, info))
 }
 
-// Apply `parse` to every present value; failures become missing and are recorded
-fn convert<T>(
+struct Converted<T> {
+    values: Vec<Option<T>>,
+    unparsed: usize,
+    unparsed_examples: Vec<String>,
+}
+
+impl<T> Converted<T> {
+    fn record(&self, info: &mut ColumnInference) {
+        info.unparsed = self.unparsed;
+        info.unparsed_examples = self.unparsed_examples.clone();
+    }
+}
+
+// Apply `parse` to every present value in a single pass. Gives up (None) as
+// soon as more than (1 - PARSE_THRESHOLD) of the values fail, so trying a
+// wrong type is cheap. Values that fail within the allowance become missing.
+fn try_convert<T>(
     cleaned: &[Option<&str>],
-    info: &mut ColumnInference,
+    present: usize,
     mut parse: impl FnMut(&str) -> Option<T>,
-) -> Vec<Option<T>> {
-    cleaned
-        .iter()
-        .map(|v| {
-            let v = (*v)?;
-            let parsed = parse(v);
-            if parsed.is_none() {
-                info.unparsed += 1;
-                push_example(&mut info.unparsed_examples, v);
+) -> Option<Converted<T>> {
+    let allowed = (present as f64 * (1.0 - PARSE_THRESHOLD)).floor() as usize;
+    let mut out = Converted {
+        values: Vec::with_capacity(cleaned.len()),
+        unparsed: 0,
+        unparsed_examples: Vec::new(),
+    };
+    for v in cleaned {
+        let Some(v) = v else {
+            out.values.push(None);
+            continue;
+        };
+        let parsed = parse(v);
+        if parsed.is_none() {
+            out.unparsed += 1;
+            if out.unparsed > allowed {
+                return None;
             }
-            parsed
-        })
-        .collect()
+            push_example(&mut out.unparsed_examples, v);
+        }
+        out.values.push(parsed);
+    }
+    Some(out)
 }
 
 fn push_example(examples: &mut Vec<String>, value: &str) {
@@ -276,7 +287,11 @@ fn push_example(examples: &mut Vec<String>, value: &str) {
 }
 
 pub fn is_placeholder(trimmed: &str) -> bool {
-    trimmed.len() <= 9 && PLACEHOLDERS.iter().any(|p| p.eq_ignore_ascii_case(trimmed))
+    // Fast path: no placeholder starts with a digit
+    if trimmed.len() > 9 || trimmed.starts_with(|c: char| c.is_ascii_digit()) {
+        return false;
+    }
+    PLACEHOLDERS.iter().any(|p| p.eq_ignore_ascii_case(trimmed))
 }
 
 fn parse_bool(v: &str) -> Option<bool> {
@@ -292,9 +307,9 @@ fn parse_bool(v: &str) -> Option<bool> {
 // Parse a number, accepting a leading currency symbol and thousands separators.
 // Returns (value, is_integral, had_formatting).
 fn parse_number(v: &str) -> Option<(f64, bool, bool)> {
-    let (sign, rest) = match v.strip_prefix('-') {
-        Some(r) => ("-", r),
-        None => ("", v.strip_prefix('+').unwrap_or(v)),
+    let (negative, rest) = match v.strip_prefix('-') {
+        Some(r) => (true, r),
+        None => (false, v.strip_prefix('+').unwrap_or(v)),
     };
     let unprefixed = rest.trim_start_matches(['$', '€', '£']);
     let had_currency = unprefixed.len() != rest.len();
@@ -313,7 +328,8 @@ fn parse_number(v: &str) -> Option<(f64, bool, bool)> {
     if !body.starts_with(|c: char| c.is_ascii_digit() || c == '.') {
         return None;
     }
-    let n: f64 = format!("{}{}", sign, body).parse().ok()?;
+    let n: f64 = body.parse().ok()?;
+    let n = if negative { -n } else { n };
     if !n.is_finite() {
         return None;
     }
@@ -332,20 +348,39 @@ fn valid_thousands(v: &str) -> bool {
         && groups.all(|g| g.len() == 3 && g.chars().all(|c| c.is_ascii_digit()))
 }
 
-// Returns (timestamp, format used, has a time component)
-fn parse_temporal(v: &str) -> Option<(NaiveDateTime, &'static str, bool)> {
+// Returns (timestamp, format used, has a time component). `last` remembers
+// the previous match so a column in one format is parsed with one attempt.
+fn parse_temporal(
+    v: &str,
+    last: &mut Option<(&'static str, bool)>,
+) -> Option<(NaiveDateTime, &'static str, bool)> {
     // Quick reject: dates contain a digit and are short
     if v.len() > 32 || !v.contains(|c: char| c.is_ascii_digit()) {
         return None;
     }
-    for format in DATETIME_FORMATS {
-        if let Ok(dt) = NaiveDateTime::parse_from_str(v, format) {
-            return Some((dt, format, true));
+    let try_format = |format: &'static str, with_time: bool| {
+        if with_time {
+            NaiveDateTime::parse_from_str(v, format).ok()
+        } else {
+            NaiveDate::parse_from_str(v, format)
+                .ok()
+                .and_then(|d| d.and_hms_opt(0, 0, 0))
+        }
+        .map(|dt| (dt, format, with_time))
+    };
+    if let Some((format, with_time)) = *last {
+        if let Some(hit) = try_format(format, with_time) {
+            return Some(hit);
         }
     }
-    for format in DATE_FORMATS {
-        if let Ok(d) = NaiveDate::parse_from_str(v, format) {
-            return Some((d.and_hms_opt(0, 0, 0)?, format, false));
+    let candidates = DATETIME_FORMATS
+        .iter()
+        .map(|f| (*f, true))
+        .chain(DATE_FORMATS.iter().map(|f| (*f, false)));
+    for (format, with_time) in candidates {
+        if let Some(hit) = try_format(format, with_time) {
+            *last = Some((format, with_time));
+            return Some(hit);
         }
     }
     None
