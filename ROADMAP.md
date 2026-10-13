@@ -23,16 +23,16 @@ moving to code.
 
 ## Where things stand
 
-The repository is a small Rust crate (`spreadsheet_engine`) with a working cell-based
-formula engine:
-- Cells hold numbers, text, formulas, or nothing, addressed as `(row, col)` or `A1`.
-- Formulas support `+ - * / ^`, parentheses, cell references, ranges, and
-  `SUM AVERAGE MIN MAX COUNT ABS SQRT ROUND`.
-- There's a dependency graph with cached results, invalidation of downstream cells
-  on change, and circular-reference detection.
-- 11 unit tests cover it.
+**Milestone M1 ("First look") is implemented.** `datatool profile data.csv`
+prints a summary, ranked data quality issues and per-column statistics, and can
+write a standalone HTML report or JSON. On a 1M-row × 30-column CSV (198 MB) a
+release build profiles everything in about 4 seconds on 4 cores. The workspace is
+split into the `datatool-core` library and the `datatool` CLI, with CI running
+fmt, clippy and tests.
 
-There's no file I/O, dataset model, statistics, visualization, or user interface yet.
+The cell-based formula engine supports arithmetic, comparisons, text, logic
+(`IF/AND/OR/NOT`) and aggregates over ranges. It has dependency tracking,
+recalculation and cycle detection, but isn't yet connected to datasets (Phase 3).
 
 ## Key architecture decision: columns, not cells
 
@@ -72,14 +72,15 @@ developer working part-time and are rough.
 ### Phase 0: Foundations (≈1 week)
 - [x] Fix formula evaluation, dependency tracking, and cycle detection; remove dead
       duplicate modules; add tests.
-- [ ] Rename the crate to `datatool` and split it into a library and binary.
-- [ ] CI on GitHub Actions running `cargo fmt --check`, `clippy -D warnings`, and `cargo test`.
-- [ ] README with what the tool does, how to install it, and a quickstart.
-- [ ] Formula engine gaps: comparison operators and `IF`, string literals and `&`
-      concatenation, `AND/OR/NOT`, absolute refs (`$A$1`), error values stored per
-      cell (`#DIV/0!`, `#REF!`) instead of only being returned.
+- [x] Split into a `datatool-core` library and a `datatool` CLI (Cargo workspace).
+- [x] CI on GitHub Actions running `cargo fmt --check`, `clippy -D warnings`, and `cargo test`.
+- [x] README with what the tool does, how to install it, and a quickstart.
+- [x] Formula engine: comparison operators, `IF`, string literals and `&`
+      concatenation, `AND/OR/NOT`, and a typed `Value` (number, text, boolean).
+- [ ] Formula engine: absolute refs (`$A$1`), and error values stored per cell
+      (`#DIV/0!`, `#REF!`) instead of only being returned.
 
-**Done when** CI is green and `cargo install --path .` gives a working `datatool` binary.
+**Done when** CI is green and `cargo install --path crates/cli` gives a working `datatool` binary.
 
 ### Phase 1: Load any dataset (≈2 weeks)
 - Readers for CSV/TSV (delimiter, quoting and encoding sniffing), Excel
@@ -94,6 +95,16 @@ developer working part-time and are rough.
 
 **Done when** a messy real-world CSV (mixed date formats, `"N/A"` placeholders,
 thousands separators) loads with correct types and no manual config.
+
+**Status: done, except**
+- [ ] Per-column type overrides.
+- [ ] Lazy loading and sampled previews. Loading is eager today, which is fast
+      enough at 1M rows (about 1.5 s) but holds the whole file in memory.
+- [ ] Choosing an Excel sheet (only the first sheet is read).
+- [ ] Encoding detection beyond UTF-8. Invalid bytes are replaced rather than
+      decoded as Latin-1 and similar encodings.
+- [ ] Day-first vs month-first preference. Ambiguous dates are read month-first
+      and flagged as a high-priority issue.
 
 ### Phase 2: Comprehend the dataset (≈3 weeks). This is the core value.
 Run `datatool profile data.csv` to get a terminal summary plus a standalone HTML
@@ -130,6 +141,20 @@ values; 12 rows have negative income, which is likely an error."*
 
 **Done when** the report on a 1M-row, 30-column CSV renders in under 10 s and a
 non-programmer can name the dataset's three biggest problems after reading it.
+
+**Status: done, except**
+- [ ] Cramér's V for categorical pairs, candidate keys and functional dependencies.
+- [ ] Target-leakage checks. These need a chosen target column, which fits
+      better with Phase 5's "What drives X?".
+- [ ] z-score outliers. Only IQR fences are used, since they hold up better
+      on skewed data.
+- [ ] Day-of-week distributions for dates.
+
+Charts are inline SVG instead of Vega-Lite, so the report has no external
+dependencies and works offline. Profile tests assert on structure and
+specific findings rather than comparing whole golden files, because some
+values depend on the current date (future-date checks) and on memory
+estimates.
 
 ### Phase 3: Clean and transform (≈3 weeks)
 - Operations: select, rename, reorder, filter (formula-based), sort, deduplicate,

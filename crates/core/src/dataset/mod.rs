@@ -6,6 +6,7 @@ use crate::error::{DataToolError, Result};
 use calamine::{open_workbook_auto, Data, DataType as _, Reader};
 use infer::{infer_column, ColumnInference, InferredType};
 use polars::prelude::*;
+use rayon::prelude::*;
 use serde::Serialize;
 use std::collections::HashSet;
 use std::fs::File;
@@ -259,10 +260,16 @@ fn build_from_text(
     let names = clean_names(&headers);
     let height = text_columns.first().map(|(_, v)| v.len()).unwrap_or(0);
 
-    let mut columns = Vec::with_capacity(text_columns.len());
-    let mut metas = Vec::with_capacity(text_columns.len());
-    for ((name, original_name), (_, values)) in names.into_iter().zip(text_columns) {
-        let (series, inference) = infer_column(&name, values)?;
+    // Columns are independent, so infer them in parallel
+    let inferred: Vec<(Series, ColumnInference)> = names
+        .par_iter()
+        .zip(text_columns.par_iter())
+        .map(|((name, _), (_, values))| infer_column(name, values.iter().copied()))
+        .collect::<PolarsResult<_>>()?;
+
+    let mut columns = Vec::with_capacity(inferred.len());
+    let mut metas = Vec::with_capacity(inferred.len());
+    for ((name, original_name), (series, inference)) in names.into_iter().zip(inferred) {
         columns.push(series.into_column());
         metas.push(ColumnMeta {
             name,
@@ -382,6 +389,33 @@ mod tests {
         assert_eq!(ds.format, Format::NdJson);
         assert_eq!(ds.columns[0].inference.inferred, InferredType::Integer);
         assert_eq!(ds.columns[1].inference.inferred, InferredType::Date);
+    }
+
+    #[test]
+    fn loads_parquet_keeping_typed_columns() {
+        let mut df = df!(
+            "n" => [1i64, 2, 3],
+            "x" => [1.5f64, 2.5, 3.5],
+            "when" => ["2024-01-01", "2024-01-02", "N/A"],
+        )
+        .unwrap();
+        let path = write_temp("typed.parquet", "");
+        ParquetWriter::new(File::create(&path).unwrap())
+            .finish(&mut df)
+            .unwrap();
+
+        let ds = load(&path).unwrap();
+        assert_eq!(ds.format, Format::Parquet);
+        let types: Vec<InferredType> = ds.columns.iter().map(|c| c.inference.inferred).collect();
+        assert_eq!(
+            types,
+            vec![
+                InferredType::Integer,
+                InferredType::Float,
+                InferredType::Date
+            ]
+        );
+        assert_eq!(ds.columns[2].inference.placeholder_nulls, 1);
     }
 
     #[test]

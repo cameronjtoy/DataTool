@@ -5,7 +5,10 @@
 
 pub mod dataset;
 pub mod error;
+pub mod profile;
+pub mod report;
 pub mod spreadsheet;
 
 pub use dataset::{load, Dataset};
 pub use error::{DataToolError, Result};
+pub use profile::{profile, DatasetProfile};

@@ -671,6 +671,7 @@ dependencies = [
  "calamine",
  "chrono",
  "polars",
+ "rayon",
  "serde",
  "serde_json",
  "thiserror",

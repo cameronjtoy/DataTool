@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use datatool_core::dataset::Dataset;
+use datatool_core::report;
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -25,6 +26,16 @@ enum Command {
     },
     /// Show each column's detected type and what was cleaned while loading
     Schema { file: PathBuf },
+    /// Profile a dataset: statistics, data quality issues and a plain-language summary
+    Profile {
+        file: PathBuf,
+        /// Also write a standalone HTML report to this path
+        #[arg(long, value_name = "PATH")]
+        html: Option<PathBuf>,
+        /// Print the full profile as JSON instead of the text summary
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -36,6 +47,21 @@ fn main() -> Result<()> {
         Command::Schema { file } => {
             let ds = load(&file)?;
             print_schema(&ds);
+        }
+        Command::Profile { file, html, json } => {
+            let ds = load(&file)?;
+            let profile = datatool_core::profile(&ds)
+                .with_context(|| format!("failed to profile {}", file.display()))?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&profile)?);
+            } else {
+                print!("{}", report::text::render(&profile));
+            }
+            if let Some(path) = html {
+                std::fs::write(&path, report::html::render(&profile))
+                    .with_context(|| format!("failed to write {}", path.display()))?;
+                eprintln!("HTML report written to {}", path.display());
+            }
         }
     }
     Ok(())
