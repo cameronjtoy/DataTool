@@ -1,3 +1,5 @@
+use crate::spreadsheet::formula::Value;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum CellValue {
     Number(f64),     // Represents a numeric value in the cell
@@ -11,7 +13,7 @@ pub struct Cell {
     pub value: CellValue,                  // The value or formula the user entered
     pub dependencies: Vec<(usize, usize)>, // Cells this cell's formula reads from
     pub dependents: Vec<(usize, usize)>,   // Cells whose formulas read from this cell
-    pub cached: Option<f64>, // Last evaluated result; None means it must be recomputed
+    pub cached: Option<Value>, // Last evaluated result; None means it must be recomputed
 }
 
 impl Cell {
