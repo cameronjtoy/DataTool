@@ -1,0 +1,22 @@
+customer_id, Name ,signup_date,age,income,plan,active,city,notes
+1001,Alice Smith,2023-01-15,34,"$52,000",Pro,yes,New York,
+1002,Bob Jones,01/22/2023,45,"61,500",basic,no,new york ,called twice
+1003,Carol White,2023-02-03,N/A,48000,Basic,yes,Boston,
+1004,Dan Brown,15/02/2023,29,-1,Pro,yes,Chicago,
+1005,Eve Black,2023-03-10,unknown,75000,Enterprise,no,Boston,VIP
+1006,Frank Green,2023-03-12,52,1250000,Pro,yes,Chicago,
+1007,Grace Hall,2023-03-20,41,58000,Basic,yes,New York,
+1007,Grace Hall,2023-03-20,41,58000,Basic,yes,New York,
+1008,Hank Lee,,38,N/A,Pro,no,Seattle,
+1009,Ivy King,2023-04-02,27,49500,basic,yes,Boston,
+1010,Jack Hill,2023-04-11,-999,55000,Pro,yes,Chicago,
+1011,Kim Wong,2023-04-18,33,twelve thousand,Basic,no,Seattle,
+1012,Leo Park,2023-05-01,61,88000,Enterprise,yes,New York,
+1013,Mia Cruz,2023-05-09,24,42000,Basic,yes,Boston,
+1014,Ned Fox,2023-05-15,47,67000,Pro,yes,Chicago,
+1015,Oli Ray,2023-05-28,36,53000,Basic,no,Seattle,
+1016,Pam Wu,2023-06-04,55,91000,Enterprise,yes,New York,
+1017,Quin Diaz,2023-06-19,30,47000,Basic,yes,Boston,
+1018,Rae Kim,2023-06-30,44,62000,Pro,yes,Chicago,
+1019,Sam Ng,2023-07-07,39,58500,Basic,no,Seattle,
+1020,Tia Lo,2023-07-21,28,45500,Basic,yes,New York,
