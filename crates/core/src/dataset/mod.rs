@@ -150,7 +150,7 @@ fn sniff_separator(path: &Path) -> std::io::Result<u8> {
     }
 
     let mut best = (b',', 0usize, 0usize); // (separator, consistent lines, fields)
-    for sep in [b',', b'\t', b';', b'|'] {
+    for sep in *b",\t;|" {
         let counts: Vec<usize> = lines.iter().map(|l| count_outside_quotes(l, sep)).collect();
         let fields = counts[0];
         if fields == 0 {
