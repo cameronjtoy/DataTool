@@ -4,7 +4,7 @@ pub mod formula;
 
 use crate::spreadsheet::cell::{Cell, CellValue};
 use crate::spreadsheet::error::SpreadsheetError;
-use crate::spreadsheet::formula::{Coord, Resolved};
+use crate::spreadsheet::formula::{Coord, Value};
 use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Default)]
@@ -95,39 +95,38 @@ impl Spreadsheet {
         }
     }
 
-    // Evaluate a cell to a number, computing formulas (and the formulas they
-    // reference) as needed. Results are cached until an upstream cell changes.
-    pub fn evaluate_cell(&mut self, row: usize, col: usize) -> Result<f64, SpreadsheetError> {
+    // Evaluate a cell, computing formulas (and the formulas they reference)
+    // as needed. Results are cached until an upstream cell changes.
+    // An empty cell evaluates to 0.
+    pub fn evaluate_cell(&mut self, row: usize, col: usize) -> Result<Value, SpreadsheetError> {
         if !self.cells.contains_key(&(row, col)) {
             return Err(SpreadsheetError::CellNotFound);
         }
-        self.evaluate_inner((row, col), &mut HashSet::new())
+        Ok(self
+            .evaluate_inner((row, col), &mut HashSet::new())?
+            .unwrap_or(Value::Number(0.0)))
     }
 
     // Evaluate a cell using an A1-style reference, e.g. "B3"
-    pub fn evaluate(&mut self, reference: &str) -> Result<f64, SpreadsheetError> {
+    pub fn evaluate(&mut self, reference: &str) -> Result<Value, SpreadsheetError> {
         let (row, col) = formula::parse_cell_ref(reference)?;
         self.evaluate_cell(row, col)
     }
 
+    // A cell's value (None if empty), evaluating it first if it is a formula
     fn evaluate_inner(
         &mut self,
         coord: Coord,
         visiting: &mut HashSet<Coord>,
-    ) -> Result<f64, SpreadsheetError> {
+    ) -> Result<Option<Value>, SpreadsheetError> {
         let source = match self.cells.get(&coord) {
-            None => return Ok(0.0),
+            None => return Ok(None),
             Some(cell) => match &cell.value {
-                CellValue::Number(n) => return Ok(*n),
-                CellValue::Empty => return Ok(0.0),
-                CellValue::Text(_) => {
-                    return Err(SpreadsheetError::TypeMismatch(format!(
-                        "{} contains text",
-                        formula::to_cell_ref(coord)
-                    )))
-                }
-                CellValue::Formula(f) => match cell.cached {
-                    Some(v) => return Ok(v),
+                CellValue::Empty => return Ok(None),
+                CellValue::Number(n) => return Ok(Some(Value::Number(*n))),
+                CellValue::Text(s) => return Ok(Some(Value::Text(s.clone()))),
+                CellValue::Formula(f) => match &cell.cached {
+                    Some(v) => return Ok(Some(v.clone())),
                     None => f.clone(),
                 },
             },
@@ -137,29 +136,13 @@ impl Spreadsheet {
             return Err(SpreadsheetError::CircularDependency);
         }
         let result = formula::parse(&source)
-            .and_then(|expr| formula::evaluate(&expr, &mut |c| self.resolve(c, visiting)));
+            .and_then(|expr| formula::evaluate(&expr, &mut |c| self.evaluate_inner(c, visiting)));
         visiting.remove(&coord);
 
         if let (Ok(v), Some(cell)) = (&result, self.cells.get_mut(&coord)) {
-            cell.cached = Some(*v);
+            cell.cached = Some(v.clone());
         }
-        result
-    }
-
-    // What a referenced cell holds, evaluating it first if it is a formula
-    fn resolve(
-        &mut self,
-        coord: Coord,
-        visiting: &mut HashSet<Coord>,
-    ) -> Result<Resolved, SpreadsheetError> {
-        match self.cells.get(&coord).map(|c| &c.value) {
-            None | Some(CellValue::Empty) => Ok(Resolved::Empty),
-            Some(CellValue::Text(_)) => Ok(Resolved::Text),
-            Some(CellValue::Number(n)) => Ok(Resolved::Number(*n)),
-            Some(CellValue::Formula(_)) => {
-                self.evaluate_inner(coord, visiting).map(Resolved::Number)
-            }
-        }
+        result.map(Some)
     }
 }
 
@@ -181,7 +164,7 @@ mod tests {
         sheet.set_cell(0, 0, num(10.0));
         sheet.set_cell(0, 1, num(5.0));
         sheet.set_cell(1, 0, formula("A1 + B1"));
-        assert_eq!(sheet.evaluate_cell(1, 0), Ok(15.0));
+        assert_eq!(sheet.evaluate_cell(1, 0), Ok(Value::Number(15.0)));
         // Evaluating must not overwrite the formula itself
         assert_eq!(sheet.get_cell_value(1, 0), Some(&formula("A1 + B1")));
     }
@@ -192,16 +175,16 @@ mod tests {
         sheet.set("A1", num(2.0)).unwrap();
         sheet.set("A2", formula("A1 * 10")).unwrap();
         sheet.set("A3", formula("A2 + 1")).unwrap();
-        assert_eq!(sheet.evaluate("A3"), Ok(21.0));
+        assert_eq!(sheet.evaluate("A3"), Ok(Value::Number(21.0)));
 
         sheet.set("A1", num(3.0)).unwrap();
-        assert_eq!(sheet.evaluate("A3"), Ok(31.0));
+        assert_eq!(sheet.evaluate("A3"), Ok(Value::Number(31.0)));
 
         // Replacing a formula removes its old dependency links
         sheet.set("A2", num(100.0)).unwrap();
-        assert_eq!(sheet.evaluate("A3"), Ok(101.0));
+        assert_eq!(sheet.evaluate("A3"), Ok(Value::Number(101.0)));
         sheet.set("A1", num(0.0)).unwrap();
-        assert_eq!(sheet.evaluate("A3"), Ok(101.0));
+        assert_eq!(sheet.evaluate("A3"), Ok(Value::Number(101.0)));
     }
 
     #[test]
@@ -218,21 +201,21 @@ mod tests {
         sheet.set("B4", formula("MAX(A1:A5, 10)")).unwrap();
         sheet.set("B5", formula("COUNT(A1:A5)")).unwrap();
 
-        assert_eq!(sheet.evaluate("B1"), Ok(6.0));
-        assert_eq!(sheet.evaluate("B2"), Ok(2.0));
-        assert_eq!(sheet.evaluate("B3"), Ok(1.0));
-        assert_eq!(sheet.evaluate("B4"), Ok(10.0));
-        assert_eq!(sheet.evaluate("B5"), Ok(3.0));
+        assert_eq!(sheet.evaluate("B1"), Ok(Value::Number(6.0)));
+        assert_eq!(sheet.evaluate("B2"), Ok(Value::Number(2.0)));
+        assert_eq!(sheet.evaluate("B3"), Ok(Value::Number(1.0)));
+        assert_eq!(sheet.evaluate("B4"), Ok(Value::Number(10.0)));
+        assert_eq!(sheet.evaluate("B5"), Ok(Value::Number(3.0)));
 
         sheet.set("A5", num(9.0)).unwrap();
-        assert_eq!(sheet.evaluate("B1"), Ok(15.0));
+        assert_eq!(sheet.evaluate("B1"), Ok(Value::Number(15.0)));
     }
 
     #[test]
     fn empty_and_text_cells() {
         let mut sheet = Spreadsheet::new();
         sheet.set("A1", formula("Z99 + 1")).unwrap();
-        assert_eq!(sheet.evaluate("A1"), Ok(1.0));
+        assert_eq!(sheet.evaluate("A1"), Ok(Value::Number(1.0)));
 
         sheet.set("B1", CellValue::Text("hello".into())).unwrap();
         sheet.set("B2", formula("B1 * 2")).unwrap();
@@ -265,7 +248,31 @@ mod tests {
 
         // Breaking the cycle makes both cells evaluate again
         sheet.set("B1", num(5.0)).unwrap();
-        assert_eq!(sheet.evaluate("A1"), Ok(6.0));
+        assert_eq!(sheet.evaluate("A1"), Ok(Value::Number(6.0)));
+    }
+
+    #[test]
+    fn text_and_logic_across_cells() {
+        let mut sheet = Spreadsheet::new();
+        sheet.set("A1", CellValue::Text("Ada".into())).unwrap();
+        sheet.set("B1", num(72.0)).unwrap();
+        sheet
+            .set("C1", formula("IF(B1 >= 65, \"senior\", \"adult\")"))
+            .unwrap();
+        sheet.set("D1", formula("A1 & \" is \" & C1")).unwrap();
+        sheet
+            .set("E1", formula("AND(B1 > 18, C1 = \"senior\")"))
+            .unwrap();
+        assert_eq!(
+            sheet.evaluate("D1"),
+            Ok(Value::Text("Ada is senior".into()))
+        );
+        assert_eq!(sheet.evaluate("E1"), Ok(Value::Bool(true)));
+        assert_eq!(sheet.evaluate("A1"), Ok(Value::Text("Ada".into())));
+
+        sheet.set("B1", num(30.0)).unwrap();
+        assert_eq!(sheet.evaluate("D1"), Ok(Value::Text("Ada is adult".into())));
+        assert_eq!(sheet.evaluate("E1"), Ok(Value::Bool(false)));
     }
 
     #[test]
